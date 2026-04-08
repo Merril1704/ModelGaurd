@@ -19,8 +19,8 @@ def main():
     
     # The Suspects: These metadata features might allow the classifier to cheat 
     # without ever looking at the actual training loss curves.
-    metadata_cols = ["num_params", "class_entropy", "dataset_source"]
-    X_pure = X_all.drop(columns=metadata_cols)
+    metadata_cols = [c for c in ["num_params", "class_entropy", "dataset_source"] if c in X_all.columns]
+    X_pure = X_all.drop(columns=metadata_cols) if metadata_cols else X_all.copy()
     
     print(f"Total features (Including potentially leaky metadata): {X_all.shape[1]}")
     print(f"Pure telemetry features (Loss curves & gradients only): {X_pure.shape[1]}\n")
