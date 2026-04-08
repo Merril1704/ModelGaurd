@@ -2,77 +2,98 @@
 
 ## Overview
 
-ModelGuard is a proof-of-concept system that predicts ML model failure modes directly from training dynamics — *before* you deploy to production. By training 120 small neural networks with deliberately injected failure conditions (overfitting, class imbalance, label noise, healthy baseline), it extracts a rich set of scalar features from each model's training curves and trains a meta-classifier to detect which failure class a new model belongs to. A Streamlit demo lets you upload any training log CSV and get an instant failure-mode diagnosis with plain-English remediation advice.
+ModelGuard is a robust, pre-deployment diagnostic system that predicts machine learning model failure modes directly from training dynamics. By monitoring the telemetry of the training process—such as loss curves, accuracy trends, and gradient norms—ModelGuard can detect whether a model is likely to fail in production *before* it is deployed. 
+
+The system leverages a meta-dataset of 1,750 small neural networks trained under seven deliberately injected conditions. Using features extracted strictly from training epoch logs, it trains a meta-classifier to identify complex failure modes with a high degree of accuracy. A Streamlit dashboard allows for rapid submission of any training log CSV to instantly receive failure-mode diagnosis and practical remediation advice.
 
 ## Project Structure
 
-```
+```text
 modelguard/
-├── data/                        # saved meta-dataset CSV + test split
-├── models/                      # trained meta-classifiers + scaler
-├── results/                     # evaluation plots and feature importances
-├── generate_meta_dataset.py     # Stage 1: train 120 models, save meta-dataset
-├── train_meta_classifier.py     # Stage 2: train RF + MLP meta-learners
-├── evaluate.py                  # Stage 3: confusion matrices, ROC-AUC, plots
-├── app.py                       # Stage 4: Streamlit demo UI
-├── utils.py                     # shared feature extraction helpers
-├── requirements.txt
-└── README.md
+├── data/                        # Contains the generated meta-dataset (meta_dataset.csv) and test splits
+├── models/                      # Saved trained meta-classifiers (RF, MLP) and StandardScaler joblib
+├── results/                     # Diagnostic outputs, generalization audits, graphs and metrics
+├── docs/                        # Research reports and supplementary documentation
+├── generate_meta_dataset.py     # Stage 1: Trains 1,750 models and builds the meta-dataset telemetry
+├── train_meta_classifier.py     # Stage 2: Trains Random Forest and MLP classifiers to predict failures
+├── evaluate.py                  # Stage 3: Produces confusion matrices, ROC curves, feature importances
+├── robust_analysis.py           # Robustness verification and metadata leakage analysis (Acid Test)
+├── validate_generalization.py   # Leave-one-dataset-out generalization tests across domain shifts
+├── app.py                       # Stage 4: Interactive Streamlit UI for ad-hoc diagnostics
+├── utils.py                     # Feature extraction functions for the pipelines
+├── requirements.txt             # Python dependencies
+└── README.md                    # Project documentation
 ```
 
-## Setup
+## Setup & Installation
 
 ```bash
-# Create / activate a conda environment (Python 3.9+)
-conda activate torch
+# Create and activate a virtual environment (Python 3.9+)
+conda create -n modelguard python=3.9
+conda activate modelguard
 
-# Install dependencies
+# Install required dependencies
 pip install -r requirements.txt
 ```
 
-> **Note:** PyTorch with CUDA is supported but not required; the pipeline runs on CPU only.
-
-## How to Run (in order)
-
-### Stage 1 — Generate Meta-Dataset (~15–30 min on CPU)
-```bash
-python generate_meta_dataset.py
-```
-Trains 120 small MLPs across three datasets with four injected failure modes.
-Saves `data/meta_dataset.csv`.
-
-### Stage 2 — Train Meta-Classifier
-```bash
-python train_meta_classifier.py
-```
-Trains a Random Forest and an MLP classifier on the meta-dataset.
-Saves models to `models/` and feature importances to `results/`.
-
-### Stage 3 — Evaluate
-```bash
-python evaluate.py
-```
-Generates confusion matrices, feature importance bar chart, and scatter plots in `results/`.
-
-### Stage 4 — Launch Streamlit App
-```bash
-streamlit run app.py
-```
-Opens the ModelGuard web UI in your browser at `http://localhost:8501`.
+> **Note:** PyTorch with CUDA is utilized if available for faster training, but the entire pipeline—including the meta-classifiers—can still fall back to CPU.
 
 ## How It Works
 
-- **Failure injection** — 120 MLPs are trained across three datasets (tabular, FashionMNIST, CIFAR-10), each with one of four conditions: overfitting (deep network, no regularisation), class imbalance (90/10 label skew), label noise (30% random label flips), or healthy baseline.
-- **Feature extraction** — After each training run, 20 scalar features are extracted from epoch curves: loss/accuracy gaps, trend slopes, volatility, convergence speed, gradient norm statistics, class entropy, and more.
-- **Meta-classification** — A Random Forest and an MLP classifier are trained on these 20-feature vectors to predict which failure mode a model belongs to.
-- **Evaluation** — Confusion matrices, macro ROC-AUC, per-class precision/recall/F1, feature importances, and diagnostic scatter plots are generated automatically.
-- **Streamlit demo** — Users upload a training log CSV; the app computes features in real-time, runs the Random Forest prediction, displays a confidence score, shows training curves, and gives actionable remediation advice.
+1. **Failure Injection & Meta-Data Generation**: 1,750 Multi-Layer Perceptrons (MLPs) are trained across three distinct datasets (Sklearn Synthetic, FashionMNIST, CIFAR-10), each deliberately afflicted with one of 7 conditions:
+   - Overfitting
+   - Class Imbalance
+   - Label Noise
+   - Vanishing Gradient
+   - Catastrophic Forgetting
+   - Data Drift
+   - Healthy Status (Baseline)
+2. **Telemetry Extraction**: For each trained sub-model, ModelGuard extracts 20 critical scalar features from the training process (e.g., train-val loss gap, gradient norm statistics, loss volatility, convergence speed, class entropy).
+3. **Meta-Classification**: Using Scikit-Learn, a Random Forest and an MLP classifier consume these dynamic "fingerprints" to predict the underlying failure condition. They achieve over 95% F1-score on pure log telemetry, proving they learn real training dynamics rather than memorizing dataset metadata.
+4. **Generalization Auditing**: The framework uses leave-one-dataset-out evaluations (e.g., train on Synthetic/FashionMNIST, test on CIFAR-10) to verify cross-domain robustness.
+5. **Streamlit UI**: Users interact with ModelGuard locally by dropping training log CSVs to receive instant diagnostics, confidence scores, plotted charts, and actionable remedies.
 
-## Failure Mode Classes
+## Usage Pipeline
 
-| Class | Label | Description |
-|-------|-------|-------------|
-| 0 | `OVERFIT` | Model memorises training data; large train/val accuracy gap |
-| 1 | `CLASS_IMBALANCE` | Training labels are heavily skewed toward a few classes |
-| 2 | `LABEL_NOISE` | 30% of training labels are randomly corrupted |
-| 3 | `HEALTHY` | Balanced data, dropout regularisation, stable convergence |
+### Stage 1 — Generate the Meta-Dataset
+```bash
+python generate_meta_dataset.py
+```
+*Generates the 1,750 model telemetry entries mapping them to one of the 7 failure targets.*
+
+### Stage 2 — Train the Meta-Classifier
+```bash
+python train_meta_classifier.py
+```
+*Trains and persists the Random Forest and MLP classification models (`models/rf_model.joblib`, `models/mlp_model.joblib`), saving out features' importance.*
+
+### Stage 3 — Evaluate Performance
+```bash
+python evaluate.py
+```
+*Creates confusion matrices, scatter visualizations, and raw classification metrics.*
+
+### Stage 4 — Robustness & Generalization (Optional but Recommended)
+```bash
+python robust_analysis.py
+python validate_generalization.py
+```
+*Executes the acid test by stripping out metadata to verify the true diagnostic capability on loss curves and gradients, followed by a domain generalization test.*
+
+### Stage 5 — Launch the Web Dashboard
+```bash
+streamlit run app.py
+```
+*Opens the GUI dashboard at `http://localhost:8501` to use the pre-trained ModelGuard.*
+
+## The 7 Failure Modes
+
+| Index | Name | Description |
+|-------|------|-------------|
+| 0 | `OVERFIT` | The model heavily memorizes training data, characterized by diverging train and validation losses. |
+| 1 | `CLASS_IMBALANCE` | Training set has an artificially skewed label distribution. |
+| 2 | `LABEL_NOISE` | Substantial random label corruption (e.g., 30%) introduced during training. |
+| 3 | `HEALTHY` | The baseline—balanced data, standard regularization, expected convergence behavior. |
+| 4 | `VANISHING_GRADIENT` | Diminished gradient flow resulting in stagnant, suboptimal training. |
+| 5 | `CATASTROPHIC_FORGETTING` | Progressive loss of previously acquired pattern behavior during sequential/prolonged fitting. |
+| 6 | `DATA_DRIFT` | Distributional shifts synthetically induced to mirror real-world non-stationarity. |
