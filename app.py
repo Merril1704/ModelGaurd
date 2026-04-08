@@ -27,13 +27,19 @@ st.set_page_config(
 # ─────────────────────────────────────────────────────────────────────────────
 # Constants
 # ─────────────────────────────────────────────────────────────────────────────
-FAILURE_LABELS = {0: "OVERFIT", 1: "CLASS_IMBALANCE", 2: "LABEL_NOISE", 3: "HEALTHY"}
+FAILURE_LABELS = {
+    0: "OVERFIT", 1: "CLASS_IMBALANCE", 2: "LABEL_NOISE", 3: "HEALTHY",
+    4: "VANISHING_GRADIENT", 5: "CATASTROPHIC_FORGETTING", 6: "DATA_DRIFT"
+}
 
 FAILURE_COLORS = {
     "OVERFIT":          "#e63946",
     "CLASS_IMBALANCE":  "#f4a261",
     "LABEL_NOISE":      "#2a9d8f",
     "HEALTHY":          "#457b9d",
+    "VANISHING_GRADIENT": "#8b5cf6",
+    "CATASTROPHIC_FORGETTING": "#ec4899",
+    "DATA_DRIFT":       "#14b8a6",
 }
 
 FAILURE_EXPLANATIONS = {
@@ -77,6 +83,31 @@ FAILURE_EXPLANATIONS = {
         "- Run a full evaluation suite on a held-out test set\n"
         "- Consider ONNX export or quantisation for production deployment"
     ),
+    "VANISHING_GRADIENT": (
+        "⚠️ **Model is stalling due to vanishing gradients.**\n\n"
+        "Your model's weights are not updating effectively because the gradient signal is too weak.\n\n"
+        "**Suggested fixes:**\n"
+        "- Use ReLU or LeakyReLU activations instead of Sigmoid/Tanh\n"
+        "- Add Batch Normalization layers\n"
+        "- Use residual connections (ResNet style)\n"
+        "- Check weight initialization (e.g. use He initialization)\n"
+    ),
+    "CATASTROPHIC_FORGETTING": (
+        "⚠️ **Model forgot previously learned information.**\n\n"
+        "The current training data distribution differs completely from earlier data, causing the model to overwrite earlier representations.\n\n"
+        "**Suggested fixes:**\n"
+        "- Randomize/shuffle your training dataset completely before training\n"
+        "- Use experience replay if doing continual learning\n"
+        "- Lower the learning rate\n"
+    ),
+    "DATA_DRIFT": (
+        "⚠️ **Validation data distribution is shifting.**\n\n"
+        "The characteristics of your validation set are consistently drifting away from your training set distribution.\n\n"
+        "**Suggested fixes:**\n"
+        "- Update your training set with recent real-world examples\n"
+        "- Add strong data augmentation to improve robustness\n"
+        "- Monitor input data distributions in production\n"
+    ),
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -102,7 +133,6 @@ FEATURE_ORDER = [
     "loss_volatility", "acc_volatility", "best_val_acc", "best_val_epoch",
     "convergence_speed", "train_val_loss_corr",
     "gradient_norm_mean", "gradient_norm_std",
-    "class_entropy", "dataset_source", "num_params",
 ]
 
 
@@ -122,9 +152,6 @@ def build_feature_vector(df_log: pd.DataFrame, overrides: dict) -> np.ndarray:
     # Merge overrides for non-curve features
     curve_feats["gradient_norm_mean"] = overrides.get("gradient_norm_mean", 0.0)
     curve_feats["gradient_norm_std"]  = overrides.get("gradient_norm_std",  0.0)
-    curve_feats["class_entropy"]      = overrides.get("class_entropy",      0.0)
-    curve_feats["dataset_source"]     = overrides.get("dataset_source",     0)
-    curve_feats["num_params"]         = overrides.get("num_params",         0)
 
     return np.array([curve_feats[f] for f in FEATURE_ORDER], dtype=float)
 
@@ -226,19 +253,6 @@ with st.sidebar:
         "gradient_norm_std", 0.0, 50.0, 0.0, 0.01,
         help="Std-dev of per-epoch gradient norms."
     )
-    class_entropy = st.slider(
-        "class_entropy (nats)", 0.0, 5.0, 0.0, 0.01,
-        help="Shannon entropy of training label distribution."
-    )
-    num_params = st.number_input(
-        "num_params (trainable)", min_value=0, value=0, step=1000,
-        help="Total number of trainable model parameters."
-    )
-    dataset_source = st.selectbox(
-        "dataset_source",
-        options=[0, 1, 2],
-        format_func=lambda x: {0: "0 — Tabular (sklearn)", 1: "1 — FashionMNIST", 2: "2 — CIFAR-10"}[x],
-    )
 
     st.markdown("---")
     st.markdown(
@@ -324,9 +338,6 @@ if uploaded is not None:
         overrides = {
             "gradient_norm_mean": gradient_norm_mean,
             "gradient_norm_std":  gradient_norm_std,
-            "class_entropy":      class_entropy,
-            "dataset_source":     dataset_source,
-            "num_params":         num_params,
         }
 
         feat_vec = build_feature_vector(df_log, overrides).reshape(1, -1)
@@ -367,7 +378,7 @@ if uploaded is not None:
         st.markdown('<div class="mg-card">', unsafe_allow_html=True)
         st.markdown("### 📊 Class Probabilities")
         prob_df = pd.DataFrame({
-            "Failure Mode": [FAILURE_LABELS[i] for i in range(4)],
+            "Failure Mode": [FAILURE_LABELS[i] for i in range(7)],
             "Probability":  proba,
         }).set_index("Failure Mode")
         st.bar_chart(prob_df)

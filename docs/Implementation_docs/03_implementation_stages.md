@@ -7,7 +7,8 @@ including what each script does, how it works internally, and what outputs it pr
 
 ## Stage 1 — `generate_meta_dataset.py`
 
-**Goal:** Train 120 small MLPs with deliberately injected failure conditions.
+**Goal:** Train deep learning models (MLPs/CNNs) with randomized, continuous failure injections to prevent target leakage and promote genuine generalization.
+Initially generate a **200-model pilot**, validating features, and then execute a **1000-model dataset generation** run.
 Extract 20 scalar features per run. Save a meta-dataset CSV.
 
 ### How it works
@@ -23,14 +24,15 @@ Extract 20 scalar features per run. Save a meta-dataset CSV.
 1. **Load datasets** — sklearn `make_classification` (auto), FashionMNIST and CIFAR-10
    (auto-download to `./raw/` via torchvision on first run).
 
-2. **Build experiment list** — 30 runs per failure class × 4 classes = 120 experiments.
-   Each run cycles through the 3 datasets (run%3 determines which dataset).
+2. **Build experiment list** — Start with a 200-model pilot (50 per class) to test distribution, scaling later to 1000 runs (250 per class).
+   Each run cycles through the 3 datasets (run%3 determines which dataset) and randomizes training parameters.
 
-3. **Apply failure injection** per class:
-   - `OVERFIT`: deep wide MLP [512×4], no dropout, 50 epochs
-   - `CLASS_IMBALANCE`: skew data to 90/10 split between 2 dominant vs rest
-   - `LABEL_NOISE`: flip 30% of labels to a random wrong class
-   - `HEALTHY`: balanced data, dropout=0.3, [128,128] MLP, 30 epochs
+3. **Apply failure injection** per class (now fully randomized):
+   - `OVERFIT`: Variable deep architecture, variable dropout (low), small data subset.
+   - `CLASS_IMBALANCE`: Skew data dynamically between 70/30 to 95/5 splits.
+   - `LABEL_NOISE`: Randomly flip between 15% and 45% of labels to a wrong class.
+   - `HEALTHY`: Balanced data, optimal dropout.
+   *(Note: Architecture metrics like `num_params` should be tracked but potentially excluded or marginalized during Stage 2 to avoid target leakage).*
 
 4. **Train on GPU** (auto-detected via `torch.cuda.is_available()`).
    Records `train_loss`, `val_loss`, `train_acc`, `val_acc` at every epoch.
@@ -53,15 +55,15 @@ Extract 20 scalar features per run. Save a meta-dataset CSV.
 ### Outputs
 
 ```
-data/meta_dataset.csv       ← 120 rows × 21 columns (20 features + label)
+data/meta_dataset.csv       ← 200/1000 rows × 21 columns (20 features + label)
 raw/FashionMNIST/           ← auto-downloaded dataset
 raw/cifar-10-batches-py/    ← auto-downloaded dataset
 ```
 
 ### Runtime
 
-- GPU (RTX 4050): ~35–45 minutes
-- CPU only: ~3–4 hours
+- GPU (RTX 4050): Pilot (200 models) ~1 hour. Full Run (1000 models) ~2.5 to 5 hours (overnight).
+- CPU only: ~10+ hours for full run.
 
 ---
 

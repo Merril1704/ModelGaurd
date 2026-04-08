@@ -23,7 +23,10 @@ SEED = 42
 random.seed(SEED)
 np.random.seed(SEED)
 
-FAILURE_NAMES   = {0: "OVERFIT", 1: "CLASS_IMBALANCE", 2: "LABEL_NOISE", 3: "HEALTHY"}
+FAILURE_NAMES   = {
+    0: "OVERFIT", 1: "CLASS_IMBALANCE", 2: "LABEL_NOISE", 3: "HEALTHY",
+    4: "VANISHING_GRADIENT", 5: "CATASTROPHIC_FORGETTING", 6: "DATA_DRIFT"
+}
 TARGET_NAMES    = [FAILURE_NAMES[i] for i in sorted(FAILURE_NAMES)]
 CLASSES         = sorted(FAILURE_NAMES.keys())
 
@@ -63,7 +66,7 @@ def plot_confusion_matrix(y_true, y_pred, title, save_path):
     fig.tight_layout()
     fig.savefig(save_path, dpi=150)
     plt.close(fig)
-    print(f"  Saved  →  {save_path}")
+    print(f"  Saved  ->  {save_path}")
 
 
 def compute_roc_auc(y_true, y_prob):
@@ -88,13 +91,16 @@ def plot_feature_importance(feature_names, importances, save_path):
     fig.tight_layout()
     fig.savefig(save_path, dpi=150)
     plt.close(fig)
-    print(f"  Saved  →  {save_path}")
+    print(f"  Saved  ->  {save_path}")
 
 
 def plot_scatter(df_full, save_path):
     """overfit_score vs loss_gap colored by failure_mode."""
-    palette = {0: "#e63946", 1: "#f4a261", 2: "#2a9d8f", 3: "#457b9d"}
-    labels  = {0: "OVERFIT", 1: "CLASS_IMBALANCE", 2: "LABEL_NOISE", 3: "HEALTHY"}
+    palette = {
+        0: "#e63946", 1: "#f4a261", 2: "#2a9d8f", 3: "#457b9d",
+        4: "#8b5cf6", 5: "#ec4899", 6: "#14b8a6"
+    }
+    labels  = FAILURE_NAMES
 
     fig, ax = plt.subplots(figsize=(8, 6))
     for cls in CLASSES:
@@ -115,7 +121,7 @@ def plot_scatter(df_full, save_path):
     fig.tight_layout()
     fig.savefig(save_path, dpi=150)
     plt.close(fig)
-    print(f"  Saved  →  {save_path}")
+    print(f"  Saved  ->  {save_path}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -143,7 +149,12 @@ def main():
     y_pred_rf  = rf_model.predict(X_test_s)
     y_prob_rf  = rf_model.predict_proba(X_test_s)
 
-    print(classification_report(y_test, y_pred_rf, target_names=TARGET_NAMES))
+    print(classification_report(
+        y_test, y_pred_rf, 
+        labels=CLASSES, 
+        target_names=TARGET_NAMES, 
+        zero_division=0
+    ))
     roc_rf = compute_roc_auc(y_test, y_prob_rf)
     print(f"ROC-AUC (macro OvR):  {roc_rf:.4f}")
 
@@ -158,7 +169,12 @@ def main():
     y_pred_mlp = mlp_model.predict(X_test_s)
     y_prob_mlp = mlp_model.predict_proba(X_test_s)
 
-    print(classification_report(y_test, y_pred_mlp, target_names=TARGET_NAMES))
+    print(classification_report(
+        y_test, y_pred_mlp, 
+        labels=CLASSES, 
+        target_names=TARGET_NAMES, 
+        zero_division=0
+    ))
     roc_mlp = compute_roc_auc(y_test, y_prob_mlp)
     print(f"ROC-AUC (macro OvR):  {roc_mlp:.4f}")
 
@@ -183,7 +199,7 @@ def main():
         save_path=os.path.join("results", "scatter.png")
     )
 
-    print("\n✅  Stage 3 complete. All plots saved to results/")
+    print("\n[DONE] Stage 3 complete. All plots saved to results/")
 
 
 if __name__ == "__main__":

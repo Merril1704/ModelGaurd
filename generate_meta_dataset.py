@@ -20,7 +20,7 @@ import torchvision
 import torchvision.transforms as transforms
 from tqdm import tqdm
 
-from utils import extract_features, compute_gradient_norm, get_class_entropy
+from utils import extract_features, compute_gradient_norm
 
 warnings.filterwarnings("ignore")
 
@@ -53,8 +53,11 @@ FAILURE_MODES = {
     1: "CLASS_IMBALANCE",
     2: "LABEL_NOISE",
     3: "HEALTHY",
+    4: "VANISHING_GRADIENT",
+    5: "CATASTROPHIC_FORGETTING",
+    6: "DATA_DRIFT",
 }
-MODELS_PER_CLASS = 30   # 4 × 30 = 120 total
+MODELS_PER_CLASS = 250   # 7 × 250 = 1750 total (Overnight Run)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -63,25 +66,30 @@ MODELS_PER_CLASS = 30   # 4 × 30 = 120 total
 
 class MLP(nn.Module):
     def __init__(self, input_size: int, hidden_sizes: list, num_classes: int,
-                 dropout: float = 0.0):
+                 dropout: float = 0.0, activation='relu'):
         super().__init__()
         layers = []
         prev = input_size
         for h in hidden_sizes:
             layers.append(nn.Linear(prev, h))
-            layers.append(nn.ReLU())
+            if activation == 'relu':
+                layers.append(nn.ReLU())
+            else:
+                layers.append(nn.Sigmoid())
             if dropout > 0:
                 layers.append(nn.Dropout(dropout))
             prev = h
         layers.append(nn.Linear(prev, num_classes))
         self.net = nn.Sequential(*layers)
 
+        if activation == 'sigmoid':
+            # tiny weight initialization for vanishing gradient
+            for m in self.modules():
+                if isinstance(m, nn.Linear):
+                    nn.init.normal_(m.weight, mean=0.0, std=0.01)
+
     def forward(self, x):
         return self.net(x)
-
-
-def count_params(model: nn.Module) -> int:
-    return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -137,10 +145,9 @@ DATASET_LOADERS = [load_sklearn_dataset, load_fashion_mnist, load_cifar10]
 # Failure-mode data transformations
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def apply_class_imbalance(X, y, num_classes):
-    """Keep 90% from 2 dominant classes, distribute 10% among the rest."""
-    rng = np.random.RandomState(SEED)
-    dominant = rng.choice(num_classes, size=2, replace=False)
+def apply_class_imbalance(X, y, num_classes, imbalance_ratio=0.90):
+    """Keep imbalance_ratio from 2 dominant classes, distribute the rest among the rest."""
+    dominant = np.random.choice(num_classes, size=2, replace=False)
 
     dom_mask  = np.isin(y, dominant)
     other_mask = ~dom_mask
@@ -149,27 +156,26 @@ def apply_class_imbalance(X, y, num_classes):
     other_X, other_y = X[other_mask], y[other_mask]
 
     n_total    = len(X)
-    n_dominant = int(n_total * 0.90)
+    n_dominant = int(n_total * imbalance_ratio)
     n_other    = n_total - n_dominant
 
-    dom_idx   = rng.choice(len(dom_X),   size=min(n_dominant, len(dom_X)),   replace=False)
-    other_idx = rng.choice(len(other_X), size=min(n_other,    len(other_X)), replace=False)
+    dom_idx   = np.random.choice(len(dom_X),   size=min(n_dominant, len(dom_X)),   replace=False)
+    other_idx = np.random.choice(len(other_X), size=min(n_other,    len(other_X)), replace=False)
 
     new_X = np.concatenate([dom_X[dom_idx],   other_X[other_idx]], axis=0)
     new_y = np.concatenate([dom_y[dom_idx],   other_y[other_idx]], axis=0)
 
-    perm = rng.permutation(len(new_X))
+    perm = np.random.permutation(len(new_X))
     return new_X[perm], new_y[perm]
 
 
 def apply_label_noise(y, num_classes, noise_rate=0.30):
     """Randomly flip noise_rate fraction of labels to a random wrong class."""
-    rng = np.random.RandomState(SEED)
     y_noisy = y.copy()
     n_noisy = int(len(y) * noise_rate)
-    noisy_idx = rng.choice(len(y), size=n_noisy, replace=False)
+    noisy_idx = np.random.choice(len(y), size=n_noisy, replace=False)
     for idx in noisy_idx:
-        wrong = rng.choice([c for c in range(num_classes) if c != y[idx]])
+        wrong = np.random.choice([c for c in range(num_classes) if c != y[idx]])
         y_noisy[idx] = wrong
     return y_noisy
 
@@ -198,20 +204,25 @@ def make_loaders(X, y, val_split=0.2):
     return to_dl(X_tr, y_tr, True), to_dl(X_val, y_val, False), y_tr
 
 
-def train_one_model(model, train_loader, val_loader, n_epochs):
+def train_one_model(model, train_loader, val_loader, n_epochs, failure_class=None, train_loader2=None):
     """Train model, return epoch logs and per-epoch gradient norms."""
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 
     logs = {"train_loss": [], "val_loss": [], "train_acc": [], "val_acc": []}
     grad_norms = []
+    
+    current_train_loader = train_loader
 
-    for _ in range(n_epochs):
+    for epoch_idx in range(n_epochs):
+        if failure_class == 5 and epoch_idx == n_epochs // 2 and train_loader2 is not None:
+            current_train_loader = train_loader2
+
         # ── Train ──
         model.train()
         tl, ta, n = 0.0, 0.0, 0
         epoch_grad_norms = []
-        for xb, yb in train_loader:
+        for xb, yb in current_train_loader:
             xb, yb = xb.to(DEVICE), yb.to(DEVICE)
             optimizer.zero_grad()
             out  = model(xb)
@@ -232,6 +243,11 @@ def train_one_model(model, train_loader, val_loader, n_epochs):
         with torch.no_grad():
             for xb, yb in val_loader:
                 xb, yb = xb.to(DEVICE), yb.to(DEVICE)
+                
+                if failure_class == 6: # DATA_DRIFT
+                    noise_level = (epoch_idx / n_epochs) * 2.0  # Scale appropriately
+                    xb = xb + torch.randn_like(xb) * noise_level
+
                 out  = model(xb)
                 loss = criterion(out, yb)
                 vl += loss.item() * len(xb)
@@ -257,27 +273,80 @@ def build_experiment(failure_class: int, input_size: int, num_classes: int,
     y_work = y.copy()
 
     if failure_class == 0:  # OVERFIT
-        hidden = [512, 512, 512, 512]
-        dropout = 0.0
-        n_epochs = 50
+        num_layers = random.randint(3, 5)
+        hidden = [random.choice([256, 512, 1024]) for _ in range(num_layers)]
+        dropout = random.uniform(0.0, 0.1)
+        n_epochs = random.randint(40, 60)
+        
+        subset_idx = np.random.choice(len(X_work), size=max(100, int(len(X_work)*0.20)), replace=False)
+        X_work, y_work = X_work[subset_idx], y_work[subset_idx]
+
     elif failure_class == 1:  # CLASS_IMBALANCE
-        X_work, y_work = apply_class_imbalance(X_work, y_work, num_classes)
-        hidden = [128, 64]
-        dropout = 0.0
-        n_epochs = 30
+        imb_ratio = random.uniform(0.70, 0.95)
+        X_work, y_work = apply_class_imbalance(X_work, y_work, num_classes, imbalance_ratio=imb_ratio)
+        
+        num_layers = random.randint(1, 3)
+        hidden = [random.choice([32, 64, 128]) for _ in range(num_layers)]
+        dropout = random.uniform(0.0, 0.2)
+        n_epochs = random.randint(20, 40)
+
     elif failure_class == 2:  # LABEL_NOISE
-        y_work = apply_label_noise(y_work, num_classes, noise_rate=0.30)
-        hidden = [128, 64]
+        noise = random.uniform(0.15, 0.45)
+        y_work = apply_label_noise(y_work, num_classes, noise_rate=noise)
+        
+        num_layers = random.randint(1, 3)
+        hidden = [random.choice([32, 64, 128]) for _ in range(num_layers)]
+        dropout = random.uniform(0.0, 0.2)
+        n_epochs = random.randint(20, 40)
+
+    elif failure_class == 4:  # VANISHING_GRADIENT
+        num_layers = random.randint(6, 8)
+        hidden = [random.choice([64, 128]) for _ in range(num_layers)]
         dropout = 0.0
-        n_epochs = 30
+        n_epochs = random.randint(30, 50)
+        model = MLP(input_size, hidden, num_classes, dropout, activation='sigmoid').to(DEVICE)
+        train_loader, val_loader, y_train = make_loaders(X_work, y_work)
+        return model, train_loader, val_loader, y_train, n_epochs, None
+
+    elif failure_class == 5:  # CATASTROPHIC_FORGETTING
+        num_layers = random.randint(2, 3)
+        hidden = [random.choice([64, 128]) for _ in range(num_layers)]
+        dropout = random.uniform(0.0, 0.2)
+        n_epochs = random.randint(30, 50)
+        
+        # Split into two disjoint sets of classes if possible.
+        half = num_classes // 2
+        mask1 = y_work < half
+        mask2 = y_work >= half
+        
+        # If we couldn't split (e.g. classes too few), fallback to random subset
+        if np.sum(mask1) < 10 or np.sum(mask2) < 10:
+            mask1 = np.random.rand(len(y_work)) > 0.5
+            mask2 = ~mask1
+
+        train_loader, val_loader, y_train = make_loaders(X_work[mask1], y_work[mask1])
+        train_loader2, _, _ = make_loaders(X_work[mask2], y_work[mask2])
+        model = MLP(input_size, hidden, num_classes, dropout).to(DEVICE)
+        return model, train_loader, val_loader, y_train, n_epochs, train_loader2
+
+    elif failure_class == 6:  # DATA_DRIFT
+        num_layers = random.randint(2, 3)
+        hidden = [random.choice([64, 128, 256]) for _ in range(num_layers)]
+        dropout = random.uniform(0.2, 0.4)
+        n_epochs = random.randint(30, 50)
+        model = MLP(input_size, hidden, num_classes, dropout).to(DEVICE)
+        train_loader, val_loader, y_train = make_loaders(X_work, y_work)
+        return model, train_loader, val_loader, y_train, n_epochs, None
+
     else:  # HEALTHY
-        hidden = [128, 128]
-        dropout = 0.3
-        n_epochs = 30
+        num_layers = random.randint(2, 3)
+        hidden = [random.choice([64, 128, 256]) for _ in range(num_layers)]
+        dropout = random.uniform(0.2, 0.5)
+        n_epochs = random.randint(25, 45)
 
     model = MLP(input_size, hidden, num_classes, dropout).to(DEVICE)
     train_loader, val_loader, y_train = make_loaders(X_work, y_work)
-    return model, train_loader, val_loader, y_train, n_epochs
+    return model, train_loader, val_loader, y_train, n_epochs, None
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -290,13 +359,13 @@ def main():
     print("=" * 60)
 
     # Pre-load all datasets (downloads happen once)
-    print("\n[1/2] Loading datasets (FashionMNIST and CIFAR-10 will auto-download)…")
+    print("\n[1/2] Loading datasets (FashionMNIST and CIFAR-10 will auto-download)...")
     datasets = []
     for i, loader_fn in enumerate(DATASET_LOADERS):
-        print(f"  Loading dataset {i} …", end=" ", flush=True)
+        print(f"  Loading dataset {i} ...", end=" ", flush=True)
         X, y, inp_sz, n_cls = loader_fn()
         datasets.append((X, y, inp_sz, n_cls))
-        print(f"done  →  shape={X.shape}, classes={n_cls}")
+        print(f"done  ->  shape={X.shape}, classes={n_cls}")
 
     # Re-encode labels to 0..N-1 (sklearn dataset already OK; torchvision too)
     datasets_enc = []
@@ -305,24 +374,26 @@ def main():
         y   = le.fit_transform(y)
         datasets_enc.append((X, y, inp_sz, n_cls))
 
-    # Build experiment list: 30 × 4 failure modes, cycling over 3 datasets
+    # Build experiment list: 30 × 7 failure modes, cycling over 3 datasets
     experiments = []
-    for fc in range(4):
+    for fc in range(7):
         for run_idx in range(MODELS_PER_CLASS):
             ds_idx = run_idx % len(datasets_enc)
             experiments.append((fc, ds_idx))
 
-    print(f"\n[2/2] Training {len(experiments)} models…\n")
+    print(f"\n[2/2] Training {len(experiments)} models...\n")
 
     rows = []
     for fc, ds_idx in tqdm(experiments, desc="Training models", unit="model"):
         X, y, inp_sz, n_cls = datasets_enc[ds_idx]
 
-        model, tr_loader, val_loader, y_train, n_epochs = build_experiment(
+        model, tr_loader, val_loader, y_train, n_epochs, tr_loader2 = build_experiment(
             fc, inp_sz, n_cls, X, y
         )
 
-        logs, grad_norms = train_one_model(model, tr_loader, val_loader, n_epochs)
+        logs, grad_norms = train_one_model(
+            model, tr_loader, val_loader, n_epochs, failure_class=fc, train_loader2=tr_loader2
+        )
 
         # Extract curve-based features
         feats = extract_features(logs)
@@ -331,18 +402,16 @@ def main():
         feats["gradient_norm_mean"] = float(np.mean(grad_norms))
         feats["gradient_norm_std"]  = float(np.std(grad_norms))
 
-        # Class entropy of training labels
-        feats["class_entropy"]  = get_class_entropy(y_train)
-        feats["dataset_source"] = ds_idx
-        feats["num_params"]     = count_params(model)
-        feats["failure_mode"]   = fc      # 0=OVERFIT 1=IMBALANCE 2=NOISE 3=HEALTHY
+        # failure mode label
+        feats["failure_mode"]   = fc
+
 
         rows.append(feats)
 
     df = pd.DataFrame(rows)
     out_path = os.path.join("data", "meta_dataset.csv")
     df.to_csv(out_path, index=False)
-    print(f"\n✅  Meta-dataset saved  →  {out_path}  ({len(df)} rows, {len(df.columns)} columns)")
+    print(f"\n[DONE] Meta-dataset saved  ->  {out_path}  ({len(df)} rows, {len(df.columns)} columns)")
     print(df["failure_mode"].value_counts().sort_index().rename(FAILURE_MODES))
 
 

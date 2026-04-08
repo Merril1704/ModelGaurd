@@ -1,0 +1,48 @@
+# Goal: Harden ModelGuard for Real-World Generalization
+
+The current implementation achieves 100% accuracy because the classifier memorizes deterministic artifacts (like exactly 30% label noise, exactly 4x512 parameters for overfit) rather than learning generalized training dynamics.
+
+To make the meta-classifier robust enough to evaluate *real* models, we need to introduce stochastic variance into the experiment design, remove leaky proxy features, and evaluate cross-domain generalization.
+
+## Proposed Changes
+
+### 1. Eliminate Target Leakage
+We will remove features that allow the classifier to identifying the failure mode without looking at the training dynamics.
+#### [MODIFY] `utils.py` and `app.py`
+- Remove `num_params` from the extracted features. Using network size as a proxy for overfitting forces the model to memorize architecture sizes rather than evaluating loss curves.
+- Remove `dataset_source`. The classifier must be completely domain-agnostic.
+
+### 2. Randomize Failure Injection Severities
+We will rewrite the failure injection factory to produce a spectrum of failures (mild to severe) rather than extreme caricatures.
+#### [MODIFY] `generate_meta_dataset.py`
+- **Class 0 (OVERFIT):** Randomize layer count (2 to 5), hidden unit size (128 to 1024), and epoch limit (40 to 80).
+- **Class 1 (CLASS_IMBALANCE):** Randomize the majority class concentration between 60% and 95%.
+- **Class 2 (LABEL_NOISE):** Randomize the label flip probability continuously between 10% and 45%.
+- **Class 3 (HEALTHY):** Uniformly sample dropout from `[0.1, 0.5]`, layer count from `[1, 3]`, and hidden units `[64, 256]`.
+
+### 3. Scale Up the Meta-Dataset
+A Random Forest will overfit to 120 points. We have the GPU capacity to do much more.
+#### [MODIFY] `generate_meta_dataset.py`
+- Increase `MODELS_PER_CLASS` from `30` to `100`.
+- The new dataset will consist of **400 trained models**. On the RTX 4050, this will run overnight or take roughly **1.5 to 2 hours**. 
+
+### 4. Implement Leave-One-Domain-Out Evaluation
+The ultimate test of meta-learning is evaluating on a dataset the meta-classifier has *never seen*. We will change Stage 2 to train on two domains and evaluate on the third.
+#### [MODIFY] `train_meta_classifier.py` and `evaluate.py`
+- Split the dataset by domain rather than a standard 80/20 split.
+- **Train Split:** All `make_classification` (tabular) and CIFAR-10 runs.
+- **Hold-out Test Split:** All `FashionMNIST` runs.
+- If the meta-classifier can accurately diagnose failures in FashionMNIST models despite only ever seeing tabular and CIFAR-10 failures during meta-training, it proves the system **actually generalizes**.
+
+## Open Questions
+
+> [!WARNING]
+> Scaling to 400 models introduces a much larger compute requirement.
+> The previous 120 models took ~39 minutes. Generating 400 models with randomized (and potentially larger) configurations could take ~2.5 hours on your GPU. Should we start with a smaller bump (e.g. 50 per class / 200 total) to test quickly, or build the massive dataset now?
+
+## Verification Plan
+
+### Automated Tests
+- Stage 1 will successfully create `data/meta_dataset.csv` with randomized configurations.
+- Stage 2 will print a `classification_report` using the new cross-dataset test hold-out. If the macro F1 is `>0.80`, it proves organic generalization.
+- Features like `acc_gap` and `val_loss_trend` should heavily outweigh other metrics in the new RF feature importance chart.

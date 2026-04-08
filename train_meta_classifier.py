@@ -20,7 +20,10 @@ SEED = 42
 random.seed(SEED)
 np.random.seed(SEED)
 
-FAILURE_NAMES = {0: "OVERFIT", 1: "CLASS_IMBALANCE", 2: "LABEL_NOISE", 3: "HEALTHY"}
+FAILURE_NAMES = {
+    0: "OVERFIT", 1: "CLASS_IMBALANCE", 2: "LABEL_NOISE", 3: "HEALTHY",
+    4: "VANISHING_GRADIENT", 5: "CATASTROPHIC_FORGETTING", 6: "DATA_DRIFT"
+}
 
 os.makedirs("models",  exist_ok=True)
 os.makedirs("results", exist_ok=True)
@@ -40,7 +43,7 @@ def main():
         )
 
     df = pd.read_csv(csv_path)
-    print(f"\nLoaded '{csv_path}'  →  {len(df)} rows, {len(df.columns)} columns")
+    print(f"\nLoaded '{csv_path}'  ->  {len(df)} rows, {len(df.columns)} columns")
     print("Failure-mode distribution:")
     print(df["failure_mode"].value_counts().sort_index().rename(FAILURE_NAMES))
 
@@ -52,8 +55,11 @@ def main():
     target_names  = [FAILURE_NAMES[i] for i in sorted(FAILURE_NAMES)]
 
     # ── Train / test split ───────────────────────────────────────────────────
+    min_required = len(FAILURE_NAMES) / 0.20
+    stratify_arg = y if len(X) >= min_required else None
+    
     X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.20, random_state=SEED, stratify=y
+        X, y, test_size=0.20, random_state=SEED, stratify=stratify_arg
     )
     print(f"\nTrain: {len(X_train)}  |  Test: {len(X_test)}")
 
@@ -65,35 +71,45 @@ def main():
     # Save scaler
     scaler_path = os.path.join("models", "scaler.joblib")
     joblib.dump(scaler, scaler_path)
-    print(f"Scaler saved  →  {scaler_path}")
+    print(f"Scaler saved  ->  {scaler_path}")
 
     # ── Random Forest ─────────────────────────────────────────────────────────
-    print("\n[1/2] Training Random Forest …", flush=True)
+    print("\n[1/2] Training Random Forest ...", flush=True)
     rf = RandomForestClassifier(
         n_estimators=100, max_depth=10, random_state=SEED, n_jobs=-1
     )
     rf.fit(X_train_s, y_train)
     rf_path = os.path.join("models", "rf_model.joblib")
     joblib.dump(rf, rf_path)
-    print(f"RF model saved  →  {rf_path}")
+    print(f"RF model saved  ->  {rf_path}")
 
     y_pred_rf = rf.predict(X_test_s)
     print("\n── Random Forest — Classification Report ──")
-    print(classification_report(y_test, y_pred_rf, target_names=target_names))
+    print(classification_report(
+        y_test, y_pred_rf,
+        labels=range(len(target_names)),
+        target_names=target_names,
+        zero_division=0
+    ))
 
     # ── MLP Classifier ────────────────────────────────────────────────────────
-    print("[2/2] Training MLP Classifier …", flush=True)
+    print("[2/2] Training MLP Classifier ...", flush=True)
     mlp = MLPClassifier(
         hidden_layer_sizes=(64, 32), max_iter=300, random_state=SEED
     )
     mlp.fit(X_train_s, y_train)
     mlp_path = os.path.join("models", "mlp_model.joblib")
     joblib.dump(mlp, mlp_path)
-    print(f"MLP model saved  →  {mlp_path}")
+    print(f"MLP model saved  ->  {mlp_path}")
 
     y_pred_mlp = mlp.predict(X_test_s)
     print("\n── MLP Classifier — Classification Report ──")
-    print(classification_report(y_test, y_pred_mlp, target_names=target_names))
+    print(classification_report(
+        y_test, y_pred_mlp,
+        labels=range(len(target_names)),
+        target_names=target_names,
+        zero_division=0
+    ))
 
     # ── Feature importances (from RF) ─────────────────────────────────────────
     fi_df = pd.DataFrame({
@@ -103,7 +119,7 @@ def main():
 
     fi_path = os.path.join("results", "feature_importances.csv")
     fi_df.to_csv(fi_path, index=False)
-    print(f"\nFeature importances saved  →  {fi_path}")
+    print(f"\nFeature importances saved  ->  {fi_path}")
     print(fi_df.head(10).to_string(index=False))
 
     # ── Also persist test split for evaluate.py ───────────────────────────────
@@ -111,9 +127,9 @@ def main():
     test_df["failure_mode"] = y_test
     test_df_path = os.path.join("data", "test_split.csv")
     test_df.to_csv(test_df_path, index=False)
-    print(f"\nTest split saved  →  {test_df_path}  (used by evaluate.py)")
+    print(f"\nTest split saved  ->  {test_df_path}  (used by evaluate.py)")
 
-    print("\n✅  Stage 2 complete.")
+    print("\n[DONE] Stage 2 complete.")
 
 
 if __name__ == "__main__":

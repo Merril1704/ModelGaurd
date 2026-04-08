@@ -115,27 +115,6 @@ def compute_gradient_norm(model) -> float:
 
 
 # ---------------------------------------------------------------------------
-# Class-distribution entropy
-# ---------------------------------------------------------------------------
-
-def get_class_entropy(labels) -> float:
-    """
-    Compute the Shannon entropy of the label distribution.
-
-    Parameters
-    ----------
-    labels : array-like of integer class labels
-
-    Returns
-    -------
-    float — entropy in nats
-    """
-    labels = np.array(labels)
-    _, counts = np.unique(labels, return_counts=True)
-    return float(stats.entropy(counts))
-
-
-# ---------------------------------------------------------------------------
 # Curve plotting (returns matplotlib Figure)
 # ---------------------------------------------------------------------------
 
